@@ -1,0 +1,6 @@
+public_data_dir: data/public
+files:
+  markets: markets.csv
+  actuals: actuals.csv
+  market_drivers: market_drivers.csv
+use_internal: false

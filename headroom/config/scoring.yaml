@@ -1,0 +1,14 @@
+weights:
+  headroom_value: 0.6
+  access_signal: 0.4
+growth_clip_min: 0.0
+thresholds:
+  accelerate: 0.70
+  nurture: 0.50
+# Optional: cap extreme price_per_unit values (per finance guidance). Omit or set to null to disable.
+# price_cap: 2000
+formatting:
+  headroom_currency: "EUR"
+  headroom_divisor: 1000000
+  headroom_decimals: 1
+  roi_decimals: 2

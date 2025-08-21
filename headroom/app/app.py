@@ -112,7 +112,7 @@ else:
         gfig.update_layout(height=180, margin=dict(l=10, r=10, t=10, b=0))
         st.markdown("**Access (0–1)**")
         st.plotly_chart(gfig, use_container_width=True)
-    # Funnel and Quarter Trend side-by-side
+    # Top row: Funnel (left) and Decomposition (right)
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Funnel – Patients to Units")
@@ -144,7 +144,7 @@ else:
         ))
         fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
-        st.caption("Note: 'Accessible Patients' is modeled via Access_Score in v1 and not shown as a separate funnel stage.")
+        st.caption(f"Period: {sel_quarter}. Note: 'Accessible Patients' is modeled via Access_Score in v1 and not shown as a separate funnel stage.")
 
         with st.expander("Funnel definitions"):
             st.markdown(
@@ -159,48 +159,192 @@ else:
             )
 
     with c2:
-        st.subheader("Trend – Sales and Headroom by Quarter")
-        trend = metrics[(metrics["market"] == sel_market) & (metrics["brand"] == sel_brand)].copy()
-        if not trend.empty:
-            # Ensure a stable quarter order; if already sorted, this is a no-op
+        # Past Performance Decomposition (Waterfall)
+        st.subheader("Past Performance Decomposition – ΔSales components")
+        # Build current and previous quarter context for selected market/brand
+        brand_hist = metrics[metrics["market"].eq(sel_market)].copy()
+        if not brand_hist.empty:
+            # Sort quarters reliably (expects format YYYYQx)
             try:
-                trend = trend.sort_values("quarter")
+                brand_hist["_q_sort"] = brand_hist["quarter"].astype(str).apply(lambda q: (int(q[:4]), int(q[-1:])))
+                brand_hist = brand_hist.sort_values(["brand", "_q_sort"])  # ensure per-brand order
             except Exception:
-                pass
-            # Compute Sales (Total) Value
-            trend["Sales_Value"] = trend["units_sold"].astype(float) * trend["price_per_unit"].astype(float)
+                brand_hist = brand_hist.sort_values(["brand", "quarter"])  # fallback
 
-            # Chart 1: Sales (Total) Value
+            # Pick latest available quarter for the selected brand
+            bh = brand_hist[brand_hist["brand"].eq(sel_brand)]
+            if len(bh) >= 2:
+                # Determine t (latest) and t-1
+                try:
+                    q_list = sorted(bh["quarter"].unique().tolist(), key=lambda q: (int(str(q)[:4]), int(str(q)[-1:])))
+                except Exception:
+                    q_list = list(bh["quarter"].unique().tolist())
+                q_t = q_list[-1]
+                q_tm1 = q_list[-2]
+
+                b_t = bh[bh["quarter"].eq(q_t)].iloc[0]
+                b_tm1 = bh[bh["quarter"].eq(q_tm1)].iloc[0]
+
+                Units_b_t = float(b_t["units_sold"])
+                Units_b_tm1 = float(b_tm1["units_sold"])
+                # Prefer net price if net_sales present
+                def _price(row):
+                    try:
+                        if "net_sales" in row.index and pd.notna(row["net_sales"]) and row["units_sold"] not in (0, None):
+                            return float(row["net_sales"]) / float(row["units_sold"]) if float(row["units_sold"]) != 0 else float(row.get("price_per_unit", 0.0))
+                    except Exception:
+                        pass
+                    return float(row.get("price_per_unit", 0.0))
+
+                Price_b_t = _price(b_t)
+                Price_b_tm1 = _price(b_tm1)
+                Sales_b_t = Units_b_t * Price_b_t
+                Sales_b_tm1 = Units_b_tm1 * Price_b_tm1
+
+                # Market totals per quarter (sum across brands in same market)
+                mkt = metrics[metrics["market"].eq(sel_market)]
+                Units_m_t = float(mkt[mkt["quarter"].eq(q_t)]["units_sold"].sum())
+                Units_m_tm1 = float(mkt[mkt["quarter"].eq(q_tm1)]["units_sold"].sum())
+
+                Share_tm1 = (Units_b_tm1 / Units_m_tm1) if Units_m_tm1 > 0 else 0.0
+                Share_t = (Units_b_t / Units_m_t) if Units_m_t > 0 else 0.0
+
+                MarketEff = (Units_m_t - Units_m_tm1) * Share_tm1 * Price_b_tm1
+                ShareEff = (Share_t - Share_tm1) * Units_m_t * Price_b_tm1
+                PriceEff = (Price_b_t - Price_b_tm1) * Units_b_t
+                DeltaSales = Sales_b_t - Sales_b_tm1
+                Residual = DeltaSales - (MarketEff + ShareEff + PriceEff)
+
+                hovertexts = [
+                    f"Market Growth: ΔMarketUnits={Units_m_t-Units_m_tm1:,.0f} · Share(t-1)={Share_tm1:.2%} · Price(t-1)={Price_b_tm1:,.2f}",
+                    f"Patient Share: ΔShare={Share_t-Share_tm1:.2%} · MarketUnits(t)={Units_m_t:,.0f} · Price(t-1)={Price_b_tm1:,.2f}",
+                    f"Price: ΔPrice={Price_b_t-Price_b_tm1:,.2f} · Units(t)={Units_b_t:,.0f}",
+                    f"Residual: ΔSales − (Market+Share+Price)",
+                    f"ΔSales: Sales(t)−Sales(t-1)={Sales_b_t:,.0f}−{Sales_b_tm1:,.0f}",
+                ]
+                wf = go.Figure(go.Waterfall(
+                    name="ΔSales",
+                    orientation="v",
+                    measure=["relative", "relative", "relative", "relative", "total"],
+                    x=["Market Growth", "Patient Share", "Price", "Other/Residual", "ΔSales"],
+                    textposition="outside",
+                    text=[f"{MarketEff:,.0f}", f"{ShareEff:,.0f}", f"{PriceEff:,.0f}", f"{Residual:,.0f}", f"{DeltaSales:,.0f}"],
+                    y=[MarketEff, ShareEff, PriceEff, Residual, DeltaSales],
+                    connector={"line": {"color": "#A0A0A0"}},
+                    hovertext=hovertexts,
+                    hoverinfo="text+name",
+                ))
+                wf.update_layout(
+                    height=420,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    yaxis=dict(rangemode="tozero"),
+                )
+                st.plotly_chart(wf, use_container_width=True)
+                st.caption(
+                    f"Decomposition period: {q_tm1} → {q_t} (brand: {sel_brand}, market: {sel_market}) · "
+                    f"Share: {Share_tm1:.2%} → {Share_t:.2%} · Market Units: {Units_m_tm1:,.0f} → {Units_m_t:,.0f} · "
+                    f"Price basis: {'net' if ('net_sales' in metrics.columns) else 'list'}"
+                )
+
+                with st.expander("Decomposition inputs"):
+                    st.write({
+                        "Units_brand": {str(q_tm1): Units_b_tm1, str(q_t): Units_b_t},
+                        "Price": {str(q_tm1): Price_b_tm1, str(q_t): Price_b_t},
+                        "Sales": {str(q_tm1): Sales_b_tm1, str(q_t): Sales_b_t},
+                        "Market_Units": {str(q_tm1): Units_m_tm1, str(q_t): Units_m_t},
+                        "Share": {str(q_tm1): Share_tm1, str(q_t): Share_t},
+                    })
+            else:
+                st.info("Not enough history to decompose past performance (need at least two quarters).")
+        else:
+            st.info("No data available to compute decomposition.")
+
+    # Below: Trend grid (2x2) for Sales, Headroom, Price, Patient Share
+    st.subheader("Trends – Sales, Headroom, Price, Patient Share")
+    trend = metrics[(metrics["market"] == sel_market) & (metrics["brand"] == sel_brand)].copy()
+    if not trend.empty:
+        try:
+            trend = trend.sort_values("quarter")
+        except Exception:
+            pass
+        trend["Sales_Value"] = trend["units_sold"].astype(float) * trend["price_per_unit"].astype(float)
+        if "net_sales" in trend.columns:
+            with pd.option_context('mode.use_inf_as_na', True):
+                trend["Net_Price_per_Unit"] = (
+                    (trend["net_sales"].astype(float) / trend["units_sold"].replace(0, pd.NA).astype(float))
+                )
+            trend["Price_for_Charts"] = trend["Net_Price_per_Unit"].fillna(trend["price_per_unit"].astype(float))
+        else:
+            trend["Price_for_Charts"] = trend["price_per_unit"].astype(float)
+
+        # Precompute quarters caption
+        try:
+            quarters_sorted = sorted(trend["quarter"].unique().tolist(), key=lambda q: (int(str(q)[:4]), int(str(q)[-1:])))
+            trend_caption = f"Trend period: {quarters_sorted[0]} → {quarters_sorted[-1]}"
+        except Exception:
+            quarters_sorted = list(trend["quarter"].unique())
+            trend_caption = ""
+
+        # Row 1
+        t11, t12 = st.columns(2)
+        with t11:
             sfig = go.Figure()
             sfig.add_trace(go.Scatter(
                 x=trend["quarter"], y=trend["Sales_Value"], mode="lines+markers",
                 name="Sales Value (€)", line=dict(color="#54A24B"), marker=dict(size=6)
             ))
-            sfig.update_layout(
-                height=300,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_title="Quarter",
-                yaxis_title="Sales Value",
-                yaxis=dict(rangemode="tozero"),
-            )
+            sfig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Quarter", yaxis_title="Sales Value", yaxis=dict(rangemode="tozero"))
             st.plotly_chart(sfig, use_container_width=True)
-
-            # Chart 2: Headroom Value
+            if trend_caption:
+                st.caption(trend_caption)
+        with t12:
             hfig = go.Figure()
             hfig.add_trace(go.Scatter(
                 x=trend["quarter"], y=trend["Headroom_Value"], mode="lines+markers",
                 name="Headroom (€)", line=dict(color="#4C78A8"), marker=dict(size=6)
             ))
-            hfig.update_layout(
-                height=300,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_title="Quarter",
-                yaxis_title="Headroom Value",
-                yaxis=dict(rangemode="tozero"),
-            )
+            hfig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Quarter", yaxis_title="Headroom Value", yaxis=dict(rangemode="tozero"))
             st.plotly_chart(hfig, use_container_width=True)
-        else:
-            st.info("No trend data for this Market/Brand.")
+            if trend_caption:
+                st.caption(trend_caption)
+
+        # Row 2
+        t21, t22 = st.columns(2)
+        with t21:
+            pfig = go.Figure()
+            pfig.add_trace(go.Scatter(
+                x=trend["quarter"], y=trend["Price_for_Charts"], mode="lines+markers",
+                name="Price per Unit", line=dict(color="#E45756"), marker=dict(size=6)
+            ))
+            pfig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Quarter", yaxis_title="Price per Unit", yaxis=dict(rangemode="tozero"))
+            st.plotly_chart(pfig, use_container_width=True)
+            if trend_caption:
+                price_basis = "Net price (net_sales/units)" if "net_sales" in trend.columns else "List price"
+                st.caption(f"{trend_caption} · {price_basis}")
+        with t22:
+            try:
+                market_totals = (
+                    metrics[metrics["market"].eq(sel_market)]
+                    .groupby("quarter", as_index=False)["units_sold"].sum()
+                    .rename(columns={"units_sold": "Market_Units"})
+                )
+                trend_share = trend.merge(market_totals, on="quarter", how="left")
+                trend_share["Patient_Share_pct"] = (
+                    (trend_share["units_sold"].astype(float) / trend_share["Market_Units"].replace(0, pd.NA).astype(float)) * 100.0
+                )
+                shfig = go.Figure()
+                shfig.add_trace(go.Scatter(
+                    x=trend_share["quarter"], y=trend_share["Patient_Share_pct"], mode="lines+markers",
+                    name="Patient Share (%)", line=dict(color="#72B7B2"), marker=dict(size=6)
+                ))
+                shfig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Quarter", yaxis_title="Patient Share (%)", yaxis=dict(rangemode="tozero"))
+                st.plotly_chart(shfig, use_container_width=True)
+                if trend_caption:
+                    st.caption(f"{trend_caption} · Share = Units_brand / Market_Units")
+            except Exception:
+                st.info("Could not compute Patient Share trend (need at least two quarters or valid market totals).")
+    else:
+        st.info("No trend data available for the selected market/brand.")
 
     # Recommendations below in a framed box
     st.subheader("Recommendations")

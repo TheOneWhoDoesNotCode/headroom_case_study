@@ -36,7 +36,7 @@ See also: [Data Usage](data_usage.md) · [Glossary](glossary.md)
 
 2) V1 - The Funnel at a Glance
 Top → Bottom (population to sales)
-a) Total Patient Population — epidemiology base (incidence/prevalence)
+a) Total Patient Population — epidemiology base (incidence/prevalence). Anchored in annual registry data (e.g., Robert Koch Institute), interpolated into quarters for comparability. Structural refresh only when new epidemiology is published.
 b) Eligible Patients — meet label/guideline criteria for the brand
 c) Accessible Patients — within payer coverage/reimbursement constraints. In Germany, payer access is national, but practical accessibility may depend on prescriber uptake and hospital formularies; in v1 this is proxied by Access_Score.
 d) Treated Patients — actually on the selected brand’s therapy in the period (proxied by that brand’s units sold)
@@ -59,6 +59,8 @@ f) Headroom = Potential – Actual — compare potential treated (b × Adoption 
   - Growth_effect = max(Growth_Trend, 0)
   - ROI_Score = w_headroom*HR_s + w_access*(Acc_s*(1 + Growth_effect))
   - Defaults: w_headroom=0.6, w_access=0.4
+
+Note on refresh cadence: Epidemiology denominators (`patients_total`, `patients_eligible`) are refreshed annually (or when new registry updates are available). For quarterly analysis, these denominators are interpolated/projected, while Actuals (`units_sold`) and Market Drivers (`access_score`, `growth_trend`) refresh quarterly.
 
 Note on granularity & joins: Calculations are per (market, brand, quarter). If `line_of_therapy` is provided (v2), extend joins to (market, brand, quarter, line_of_therapy) and interpret headroom per line.
 
@@ -117,10 +119,36 @@ Note on granularity & joins: Calculations are per (market, brand, quarter). If `
 
 8a) Assumptions Addendum (read‑me‑first clarifications)
 - Treatment duration vs. units proxy: In v1, one unit is treated as a proxy for one patient treated in the period. For oral or cyclical therapies where units ≠ patient‑equivalents, conversion factors may be added in v2 to improve accuracy.
-- Epidemiology refresh/time lag: Epidemiology inputs may lag by 1–2 years. Recent quarters may require projection/interpolation; adjustments should be version‑controlled and documented.
+- Epidemiology refresh/time lag: Epidemiology inputs may lag by 1–2 years. They are refreshed only when new registry data is published (typically annual/multi‑year). For quarterly comparability, epi denominators are interpolated, while treatment and sales trackers update quarterly. Any adjustments (projection methods, interpolation factors) should be version‑controlled and documented.
 - Access nuance (DE context): Access_Score in v1 is a synthetic construct. In Germany, payer access is largely national; practical constraints may stem more from physician uptake or hospital formularies. This nuance can be layered in v2.
 - Sentiment/competitive factor: Sentiment/competitive signals are exploratory and not included in ROI v1.
 - ROI comparability: ROI scores are relative to the dataset in scope (per run). Cross‑quarter or cross‑dataset comparisons require recalibration; avoid comparing absolute ROI values across runs.
+
+
+8b) Past Performance Decomposition (context; not part of headroom calc)
+Headroom is a forward‑looking gap (Potential − Actual) and remains intentionally simple. To explain historical movements and create context for capturing headroom, we decompose ΔSales vs prior period (quarter or year) into standard drivers:
+
+- Formula
+
+  ```text
+  ΔSales = Market Growth Effect + Patient Share Effect + Price Effect + Other/Residual
+  ```
+
+- Driver definitions
+  - Market Growth Effect: Change driven by total treated patient pool (e.g., epidemiology evolution, diagnosis/treatment expansion).
+  - Patient Share Effect: Change driven by shifts in brand’s share of treated patients (competitive dynamics, promotion, clinical preference).
+  - Price Effect: Change driven by average net price per unit (rebates, tenders, list→net changes, pack/mix effects).
+  - Other/Residual: Timing effects (stocking, tenders), data coverage, or residual mix not captured above.
+
+- Simple attribution method (v1, illustrative)
+  - Market Growth = Δ(Total Market Units) × Brand Share_previous
+  - Share = Δ(Brand Share) × Total Market Units_current
+  - Price = Δ(Net Price) × Brand Units_current
+  - Residual = Actual ΔSales − (Market + Share + Price)
+
+- Positioning in the workflow
+  - This decomposition is descriptive (backward‑looking) and complements headroom by indicating which levers historically moved sales.
+  - In v2, consider tagging opportunities with dominant driver(s) to inform action selection alongside ROI (e.g., if Market drives, focus on diagnosis/epi; if Share drives, focus on competitive/promotional levers).
 
 
 9) Communication Checklist (for slides & talk track)

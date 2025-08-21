@@ -1,0 +1,9 @@
+# Example configuration for LLM-backed recommendations
+# Copy to headroom/config/llm.yaml and adjust as needed
+
+provider: openai
+model: gpt-4o-mini
+params:
+  temperature: 0.2
+  max_tokens: 900
+  # You can tune these per your needs

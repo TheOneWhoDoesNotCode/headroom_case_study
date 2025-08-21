@@ -27,6 +27,29 @@ python -m pip install -r requirements.txt
 streamlit run headroom/app/app.py
 ```
 
+3. LLM setup (optional for AI Insights/Brainstorm):
+
+```bash
+# .env at repo root
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini   # default model used by the app
+OPENAI_API_KEY=sk-...
+```
+
+- Alternatively, copy `headroom/config/llm.example.yaml` to `headroom/config/llm.yaml` and adjust:
+
+```yaml
+provider: openai
+model: gpt-4o-mini
+params:
+  temperature: 0.2
+  max_tokens: 900
+```
+
+Notes:
+- The Brainstorm section has a model dropdown limited to `gpt-4o` and `gpt-4o-mini`.
+- The Insights section uses the configured default (`LLM_MODEL` or `config/llm.yaml`).
+
 ## Documentation map
 - Canonical business logic spec: `docs/business_logic.md`
 - Data usage & inputs: `docs/data_usage.md`

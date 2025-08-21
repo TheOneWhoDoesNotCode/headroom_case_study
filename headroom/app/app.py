@@ -1,6 +1,7 @@
 """Headroom Pretotype demo app — v1 pilot context: Germany (DE), oncology brands."""
 import os
 import sys
+import json
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
@@ -18,8 +19,18 @@ from src.loaders import load_public_data
 from src.compute import compute_metrics
 from src.rules import recommend_actions
 from src.utils import load_yaml
+from src.llm_recs import llm_recommend_actions
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# Cache wrapper for LLM calls keyed by the JSON context
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_llm_call(context_key: str):
+    try:
+        ctx = json.loads(context_key)
+    except Exception:
+        ctx = {}
+    return llm_recommend_actions(None, ctx)
 
 @st.cache_data
 def _load():
@@ -347,16 +358,203 @@ else:
         st.info("No trend data available for the selected market/brand.")
 
     # Recommendations below in a framed box
-    st.subheader("Recommendations")
-    recs = recommend_actions(view, thresholds=scoring_cfg.get("thresholds", {}))
-    if len(recs) == 0:
-        st.info("No specific recommendations yet — tune rules in src/rules.py")
-    else:
-        box_start = """
-<div style="border:1px solid #e6e6e6; padding:12px; border-radius:8px; background:#fafafa;">
-"""
-        box_end = "</div>"
-        items = "\n".join([f"- {rtxt}" for rtxt in recs])
-        st.markdown(box_start + items + box_end, unsafe_allow_html=True)
+    st.subheader("Insights")
+    st.caption("Descriptive, data-only insights (no prescriptions).")
+    # Load optional LLM config for defaults
+    try:
+        llm_cfg_ins = load_yaml(os.path.join(BASE_DIR, "config", "llm.yaml"))
+    except Exception:
+        llm_cfg_ins = {}
+    prov_ins = (llm_cfg_ins.get("provider") or os.getenv("LLM_PROVIDER") or "openai")
+    model_ins = (llm_cfg_ins.get("model") or os.getenv("LLM_MODEL") or "gpt-4o-mini")
+    gen_insights = st.button("Generate insights")
+
+    if gen_insights:
+        try:
+            quarters_list = trend["quarter"].astype(str).tolist() if "trend" in locals() else []
+            sales_vals = trend.get("Sales_Value", pd.Series(dtype=float)).astype(float).tolist() if "trend" in locals() else []
+            headroom_vals = trend.get("Headroom_Value", pd.Series(dtype=float)).astype(float).tolist() if "trend" in locals() else []
+            price_vals = trend.get("Price_for_Charts", pd.Series(dtype=float)).astype(float).tolist() if "trend" in locals() else []
+            # Keep last 8
+            quarters_last = quarters_list[-8:]
+            sales_last = sales_vals[-8:]
+            headroom_last = headroom_vals[-8:]
+            price_last = price_vals[-8:]
+            trends_ctx = {
+                "quarters": quarters_last,
+                "sales_value": sales_last,
+                "headroom_value": headroom_last,
+                "price": price_last,
+                "sales_value_map": {q: v for q, v in zip(quarters_last, sales_last)},
+                "headroom_value_map": {q: v for q, v in zip(quarters_last, headroom_last)},
+                "price_map": {q: v for q, v in zip(quarters_last, price_last)},
+            }
+
+            context_ins = {
+                "mode": "insights",
+                "params": {"temperature": 0.0, "max_tokens": 900},
+                "selection": {"market": sel_market, "brand": sel_brand, "quarter": sel_quarter},
+                "kpis": {
+                    "units_sold": float(r.get("units_sold", 0.0)),
+                    "price_per_unit": float(r.get("price_per_unit", 0.0)),
+                    "Headroom_Value": float(r.get("Headroom_Value", 0.0)),
+                    "access_score": float(r.get("access_score", 0.0)),
+                    "ROI_Score": float(r.get("ROI_Score", 0.0)),
+                },
+                "trends": trends_ctx,
+                "decomp": locals().get("DeltaSales") and {
+                    "market_eff": float(locals().get("MarketEff", 0.0)),
+                    "share_eff": float(locals().get("ShareEff", 0.0)),
+                    "price_eff": float(locals().get("PriceEff", 0.0)),
+                    "delta_sales": float(locals().get("DeltaSales", 0.0)),
+                } or None,
+                "thresholds": scoring_cfg.get("thresholds", {}),
+                "currency": scoring_cfg.get("formatting", {}).get("headroom_currency", "EUR"),
+                "provider": prov_ins,
+                "model": model_ins,
+            }
+
+            with st.spinner("Generating insights…"):
+                context_key = json.dumps(context_ins, ensure_ascii=False, sort_keys=True)
+                insight_res = _cached_llm_call(context_key)
+
+            if isinstance(insight_res, dict):
+                if insight_res.get("summary"):
+                    st.markdown(f"**Summary**: {insight_res['summary']}")
+                bullets = insight_res.get("bullets") or []
+                if bullets:
+                    st.markdown("**Key insights**")
+                    for b in bullets:
+                        text = b.get("text") if isinstance(b, dict) else str(b)
+                        cites = b.get("data_citations", []) if isinstance(b, dict) else []
+                        cite_str = f" _(refs: {', '.join(map(str, cites))})_" if cites else ""
+                        st.markdown(f"- {text}{cite_str}")
+                else:
+                    # Fallback to legacy 'options' observations
+                    obs = insight_res.get("options", []) or []
+                    if obs:
+                        st.markdown("**Observations**")
+                        for o in obs:
+                            st.markdown(f"- {o.get('title') or o.get('rationale') or str(o)}")
+            else:
+                st.json(insight_res)
+        except Exception as e:
+            st.warning(f"Insights unavailable: {e}")
+
+    # Optional: AI-generated insights & recommendations (LLM)
+    st.divider()
+    st.subheader("Brainstorm recommendations")
+    # Load optional LLM config
+    try:
+        llm_cfg = load_yaml(os.path.join(BASE_DIR, "config", "llm.yaml"))
+    except Exception:
+        llm_cfg = {}
+    prov_default = (llm_cfg.get("provider") or os.getenv("LLM_PROVIDER") or "openai")
+    model_default = (llm_cfg.get("model") or os.getenv("LLM_MODEL") or "gpt-4o-mini")
+    colp, colm = st.columns([1, 2])
+    with colp:
+        provider = st.selectbox("Provider", options=["openai"], index=["openai"].index(prov_default) if prov_default in ["openai"] else 0)
+    with colm:
+        base_models = ["gpt-4o", "gpt-4o-mini"]
+        # Ensure default is visible
+        if model_default not in base_models:
+            base_models = [model_default] + [m for m in base_models if m != model_default]
+        model_options = base_models
+        default_idx = model_options.index(model_default) if model_default in model_options else 0
+        selected_model = st.selectbox("Model", options=model_options, index=default_idx)
+    user_note = st.text_area("Focus (optional)", placeholder="e.g., prioritize access barriers vs. price actions")
+    gen = st.button("Brainstorm recommendations")
+
+    if gen:
+        # Build context for LLM
+        try:
+            # Trends may be empty; slice safely and include quarter-keyed maps
+            quarters_list = trend["quarter"].astype(str).tolist() if "trend" in locals() else []
+            sales_vals = trend.get("Sales_Value", pd.Series(dtype=float)).astype(float).tolist() if "trend" in locals() else []
+            headroom_vals = trend.get("Headroom_Value", pd.Series(dtype=float)).astype(float).tolist() if "trend" in locals() else []
+            price_vals = trend.get("Price_for_Charts", pd.Series(dtype=float)).astype(float).tolist() if "trend" in locals() else []
+            quarters_last = quarters_list[-8:]
+            sales_last = sales_vals[-8:]
+            headroom_last = headroom_vals[-8:]
+            price_last = price_vals[-8:]
+            trends_ctx = {
+                "quarters": quarters_last,
+                "sales_value": sales_last,
+                "headroom_value": headroom_last,
+                "price": price_last,
+                "sales_value_map": {q: v for q, v in zip(quarters_last, sales_last)},
+                "headroom_value_map": {q: v for q, v in zip(quarters_last, headroom_last)},
+                "price_map": {q: v for q, v in zip(quarters_last, price_last)},
+            }
+
+            context = {
+                "selection": {"market": sel_market, "brand": sel_brand, "quarter": sel_quarter},
+                "kpis": {
+                    "units_sold": float(r.get("units_sold", 0.0)),
+                    "price_per_unit": float(r.get("price_per_unit", 0.0)),
+                    "Headroom_Value": float(r.get("Headroom_Value", 0.0)),
+                    "access_score": float(r.get("access_score", 0.0)),
+                    "ROI_Score": float(r.get("ROI_Score", 0.0)),
+                },
+                "trends": trends_ctx,
+                "decomp": locals().get("DeltaSales") and {
+                    "market_eff": float(locals().get("MarketEff", 0.0)),
+                    "share_eff": float(locals().get("ShareEff", 0.0)),
+                    "price_eff": float(locals().get("PriceEff", 0.0)),
+                    "delta_sales": float(locals().get("DeltaSales", 0.0)),
+                } or None,
+                "thresholds": scoring_cfg.get("thresholds", {}),
+                "currency": scoring_cfg.get("formatting", {}).get("headroom_currency", "EUR"),
+                "notes": user_note,
+                "provider": provider,
+                "model": selected_model,
+                "mode": "recommendations",
+                "params": {"temperature": float(llm_cfg.get("params", {}).get("temperature", 0.2)) if 'llm_cfg' in locals() else 0.2, "max_tokens": int(llm_cfg.get("params", {}).get("max_tokens", 900)) if 'llm_cfg' in locals() else 900},
+            }
+
+            # Visual cue when focus is provided
+            if (user_note or "").strip():
+                st.info("Focus applied: " + (user_note or "").strip())
+
+            with st.spinner("Brainstorming recommendations…"):
+                context_key = json.dumps(context, ensure_ascii=False, sort_keys=True)
+                ai_res = _cached_llm_call(context_key)
+
+            # Render AI output
+            if isinstance(ai_res, dict):
+                if ai_res.get("summary"):
+                    st.markdown(f"**Summary**: {ai_res['summary']}")
+                opts = ai_res.get("options", []) or []
+                for i, opt in enumerate(opts, start=1):
+                    st.markdown(f"### Option {i}: {opt.get('title', 'Untitled')}")
+                    if opt.get("rationale"):
+                        st.markdown(opt["rationale"]) 
+                    eff = opt.get("expected_effect") or {}
+                    if eff:
+                        st.markdown(f"- Expected effect: sales Δ {eff.get('sales_delta', 'n/a')}, headroom Δ {eff.get('headroom_delta', 'n/a')}")
+                    # Focus alignment if present
+                    if opt.get("focus_alignment") is not None:
+                        try:
+                            fa = float(opt.get("focus_alignment"))
+                            st.markdown(f"- Focus alignment: {fa:.2f}")
+                        except Exception:
+                            st.markdown(f"- Focus alignment: {opt.get('focus_alignment')}")
+                    if opt.get("why_aligned"):
+                        st.markdown(f"- Why aligned: {opt.get('why_aligned')}")
+                    risks = opt.get("risks") or []
+                    if risks:
+                        st.markdown("- Risks:")
+                        for rk in risks:
+                            st.markdown(f"  - {rk}")
+                    cites = opt.get("data_citations") or []
+                    if cites:
+                        st.caption("Data citations: " + ", ".join(map(str, cites)))
+                if ai_res.get("confidence") is not None:
+                    st.caption(f"Model: {provider}/{selected_model} · Confidence: {ai_res['confidence']}")
+            else:
+                st.json(ai_res)
+
+        except Exception as e:
+            st.warning(f"AI recommendations unavailable: {e}")
 
 

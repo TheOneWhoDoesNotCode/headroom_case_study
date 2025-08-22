@@ -14,8 +14,9 @@ See also: [Data Usage](data_usage.md) · [Glossary](glossary.md)
 **in-scope:**    
 **v1 (This Pretotype scope):**
 *   **Scope**: National-level analysis (per market/brand/quarter).
-*   **Prioritization**: Ranks opportunities using Headroom (size of prize) and a blended Access/Growth score (ease of capture).
+*   **Prioritization**: Ranks opportunities using Headroom (size of prize) and a blended Access/Growth/Reach score (ease of capture).
 *   **Funnel**: Models 'Accessible Patients' via a proxy `Access_Score`.
+*   **Reach**: Incorporates % of target customers reached as a direct signal of ability to capture headroom.
 *   **Data**: CSV-based inputs.
 *   **Configurable**: Thresholds and weights editable in `config/scoring.yaml`.
 *   **Context**: Pilot domain is Germany (DE), oncology brands.
@@ -44,6 +45,9 @@ e) Sales (Units × Price) — commercial output from treated units at net price
 f) Headroom = Potential – Actual — compare potential treated (b × Adoption Ceiling) vs actual treated (d); size of prize in units and €, valuing with price per unit from (e)
 
 
+Note (Adoption Ceiling vs Access): Adoption Ceiling caps Potential_Units (Eligible × Adoption_Ceiling) and shapes the size of prize. Access_Score in v1 does not cap potential; it is an ease-of-capture proxy used in Priority ranking. In v2, an explicit `accessible_fraction` can be used to cap potential if desired.
+
+
 3) Core Formulas
 - Potential (patients/units)
   - Potential_Units = Eligible_Patients × Adoption_Ceiling (for the selected brand in the given market/quarter)
@@ -52,13 +56,15 @@ f) Headroom = Potential – Actual — compare potential treated (b × Adoption 
 - Headroom
   - Headroom_Units = max(Potential_Units − Actual_Units, 0)
   - Headroom_Value = Headroom_Units × Price_Per_Unit
-- ROI Score (ranking aid, configurable)
+- Priority Score (ranking aid, configurable)
   - Normalize to 0–1 within the current dataset (using min-max scaling)
   - HR_s = scale(Headroom_Value)
   - Acc_s = scale(Access_Score)
+  - Reach_s = scale(Customers_Reached / Customers_Targeted)
   - Growth_effect = max(Growth_Trend, 0)
-  - ROI_Score = w_headroom*HR_s + w_access*(Acc_s*(1 + Growth_effect))
-  - Defaults: w_headroom=0.6, w_access=0.4
+  - Priority_Score = w_headroom*HR_s + w_access*(Acc_s*(1 + Growth_effect)) + w_reach*Reach_s
+  - Defaults: w_headroom=0.5, w_access=0.3, w_reach=0.2
+  - v2 option: Extend with customer engagement/propensity term, e.g., + w_eng*Eng_s, where Eng_s is a scaled engagement/propensity signal (0–1) and w_eng is configurable in `config/scoring.yaml`.
 
 Note on refresh cadence: Epidemiology denominators (`patients_total`, `patients_eligible`) are refreshed annually (or when new registry updates are available). For quarterly analysis, these denominators are interpolated/projected, while Actuals (`units_sold`) and Market Drivers (`access_score`, `growth_trend`) refresh quarterly.
 
@@ -68,15 +74,16 @@ Note on granularity & joins: Calculations are per (market, brand, quarter). If `
 4) Clear Definitions (glossary)
 - Total Patient Population: Epidemiology base (incidence = new cases over a period; prevalence = total existing cases at a point—or period—in time).
 - Eligible Patients: Patients meeting label/guideline criteria for the brand.
-- Accessible Patients: Portion of eligible patients within payer coverage/reimbursement (modeled via Access_Score in v1; can be explicit in v2). In v1, Accessible Patients aren’t explicitly multiplied in the funnel but are proxied through the Access_Score adjustment in the ROI ranking.
+- Accessible Patients: Portion of eligible patients within payer coverage/reimbursement (modeled via Access_Score in v1; can be explicit in v2). In v1, Accessible Patients aren’t explicitly multiplied in the funnel but are proxied through the Access_Score adjustment in the Priority ranking. Access_Score in v1 is payer/reimbursement–centric and does not include customer engagement/targeting.
 - Treated Patients: Patients actually receiving the selected brand’s therapy in the period (proxied by that brand’s Units_Sold).
 - Adoption Ceiling (0–1): % of eligible patients realistically expected to initiate therapy under optimal but practical conditions; this caps Potential_Units. It is an evidence-based input (e.g., from expert judgment or analog brand uptake), validated with cross-functional alignment (medical, market access, brand), and is set per market/brand.
 - Price per Unit: Net price used to translate units to value (€).
 - Headroom (Units/€): For the selected brand and period, the non‑negative gap between potential and actual (the size of prize).
 - Access_Score (0–1): Payer/reimbursement ease; higher = easier to capture headroom.
 - Growth_Trend: Market momentum (e.g., +0.05 = +5%); negatives are clipped to 0 in scoring.
-- ROI Score: Weighted blend of size of prize and ease of capture to prioritize opportunities.
-- Recommended Action: Rule‑based next step linked to ROI tier.
+- Reach_s (0–1): % of targeted customers/accounts reached in the last period, normalized to 0–1.
+- Priority Score: Weighted blend of size of prize and ease of capture to prioritize opportunities.
+- Recommended Action: Rule‑based next step linked to Priority tier.
 
 
 5) Data Contracts (tidy tables; joined on market, brand, quarter)
@@ -87,15 +94,15 @@ Note on granularity & joins: Calculations are per (market, brand, quarter). If `
   - Columns: market, brand, quarter, units_sold, net_sales
   - Optional (v2): line_of_therapy — aligns with markets.csv for per-line joins
 - market_drivers.csv
-  - Columns: market, brand, quarter, access_score, growth_trend, sentiment_score (optional)
+  - Columns: market, brand, quarter, access_score, growth_trend, customers_reached, customers_targeted, sentiment_score (optional)
   - Optional (v2): line_of_therapy — aligns with other tables
 - Note: v1 uses public/mock data. Pilot swaps in approved Oracle/Snowflake views with the same schema — see next_steps.md.
 
 
 6) Decision Rules (default)
-- ROI ≥ 0.70 → Accelerate: increase call frequency + targeted content.
-- 0.50 ≤ ROI < 0.70 → Nurture: digital programs + HCP webinars.
-- ROI < 0.50 → Monitor: maintain, track signals.
+- Priority ≥ 0.70 → Accelerate: increase call frequency + targeted content.
+- 0.50 ≤ Priority < 0.70 → Nurture: digital programs + HCP webinars.
+- Priority < 0.50 → Monitor: maintain, track signals.
 - (Thresholds are editable in config/scoring.yaml.)
 
 
@@ -104,7 +111,7 @@ Note on granularity & joins: Calculations are per (market, brand, quarter). If `
 - Eligible = 40,000, Adoption ceiling = 0.60 → Potential_Units = 24,000
 - Actual Units_Sold = 20,000 → Headroom_Units = 4,000
 - Price/Unit = €500 → Headroom_Value = €2.0M
-- Access_Score = 0.75, Growth_Trend = +0.05 → ROI computed per formula → Recommended Action: Accelerate
+- Access_Score = 0.75, Growth_Trend = +0.05 → Priority Score computed per formula → Recommended Action: Accelerate
 
 
 8) Assumptions & Guardrails
@@ -121,8 +128,8 @@ Note on granularity & joins: Calculations are per (market, brand, quarter). If `
 - Treatment duration vs. units proxy: In v1, one unit is treated as a proxy for one patient treated in the period. For oral or cyclical therapies where units ≠ patient‑equivalents, conversion factors may be added in v2 to improve accuracy.
 - Epidemiology refresh/time lag: Epidemiology inputs may lag by 1–2 years. They are refreshed only when new registry data is published (typically annual/multi‑year). For quarterly comparability, epi denominators are interpolated, while treatment and sales trackers update quarterly. Any adjustments (projection methods, interpolation factors) should be version‑controlled and documented.
 - Access nuance (DE context): Access_Score in v1 is a synthetic construct. In Germany, payer access is largely national; practical constraints may stem more from physician uptake or hospital formularies. This nuance can be layered in v2.
-- Sentiment/competitive factor: Sentiment/competitive signals are exploratory and not included in ROI v1.
-- ROI comparability: ROI scores are relative to the dataset in scope (per run). Cross‑quarter or cross‑dataset comparisons require recalibration; avoid comparing absolute ROI values across runs.
+- Sentiment/competitive factor: Sentiment/competitive signals are exploratory and not included in the Priority Score v1.
+- Priority comparability: Priority scores are relative to the dataset in scope (per run). Cross‑quarter or cross‑dataset comparisons require recalibration; avoid comparing absolute Priority values across runs.
 
 
 8b) Past Performance Decomposition (context; not part of headroom calc)
@@ -148,11 +155,11 @@ Headroom is a forward‑looking gap (Potential − Actual) and remains intention
 
 - Positioning in the workflow
   - This decomposition is descriptive (backward‑looking) and complements headroom by indicating which levers historically moved sales.
-  - In v2, consider tagging opportunities with dominant driver(s) to inform action selection alongside ROI (e.g., if Market drives, focus on diagnosis/epi; if Share drives, focus on competitive/promotional levers).
+  - In v2, consider tagging opportunities with dominant driver(s) to inform action selection alongside Priority Score (e.g., if Market drives, focus on diagnosis/epi; if Share drives, focus on competitive/promotional levers).
 
 
 9) Communication Checklist (for slides & talk track)
-- One sentence: “Headroom quantifies untapped value by comparing potential to actual; we then rank by ROI to focus where we can win fastest.”
+- One sentence: “Headroom quantifies untapped value by comparing potential to actual; we then rank by Priority Score to focus where we can win fastest.”
 - Show the funnel: Total → Eligible → Accessible → Treated → Sales (with the Headroom gap highlighted).
 - Tie to action: End each view with Recommended Action (Accelerate/Nurture/Monitor).
 - Time saved: “This standardizes the method across brands/markets and cuts manual consolidation from weeks to minutes.”
@@ -170,8 +177,8 @@ Headroom is a forward‑looking gap (Potential − Actual) and remains intention
 11) What “Good” Looks Like (acceptance criteria)
 - KPI cards populate and update with Market/Brand selection.
 - Funnel chart and KPI table align (no contradictory counts).
-- Headroom never negative; ROI ∈ [0,1].
-- Prioritized table sorted by ROI; action labels match thresholds.
+- Headroom never negative; Priority ∈ [0,1].
+- Prioritized table sorted by Priority Score; action labels match thresholds.
 - Config changes (weights/thresholds) affect results without code changes.
 
 
@@ -184,12 +191,12 @@ Headroom is a forward‑looking gap (Potential − Actual) and remains intention
   - Business Insight Footer: Cuts manual consolidation from weeks to minutes; enforces consistency across brands/markets; highlights actionable growth priorities.
 - Styling tips
   - Use semi‑transparent overlays for definitions; bold the term then short definition.
-  - Keep currency as €M with 1 decimal; ROI with 2 decimals.
+  - Keep currency as €M with 1 decimal; Priority Score with 2 decimals.
   - Add “Data as of <YYYY‑MM‑DD>” to the app and screenshots.
 
 
 13) FAQ (quick answers)
-- Why not rank purely by headroom? Because ease of capture matters; access and momentum change near‑term ROI.
+- Why not rank purely by headroom? Because ease of capture matters; access and momentum change near‑term priority.
 - Where’s ‘Accessible Patients’ in the math? Modeled via Access_Score (v1). Can be explicit as an additional multiplier in v2.
 - Can we validate assumptions? Yes—add a validation layer (ranges, null checks) and a sensitivity test on weights.
 - How does this scale? Same logic; swap loaders to Oracle/Snowflake and schedule nightly; see next_steps.md.

@@ -6,7 +6,7 @@ Provide a fast, user-friendly way to consolidate market and patient data, comput
 ## Features
 - Load mock datasets (public CSVs) to simulate Oracle/finance extracts
 - Compute potential, actuals, and headroom value
-- Rank markets/brands by ROI score
+- Rank markets/brands by Priority Score
 - Visualize patient funnel & key metrics
 - Provide recommended actions
 

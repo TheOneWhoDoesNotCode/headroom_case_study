@@ -90,9 +90,120 @@ except NameError:
     # Fallback in case sidebar hasn't set apply_filters yet
     view = metrics
 
+# Top-of-page: Funnel – sets the story context first
+row_top = metrics[(metrics["market"] == sel_market) & (metrics["brand"] == sel_brand) & (metrics["quarter"] == sel_quarter)]
+if row_top.empty:
+    st.info("No data for selection.")
+else:
+    rt = row_top.iloc[0]
+    st.subheader("Funnel – Patients to Units")
+    left, mid, right = st.columns([1, 2, 1])
+    # Left KPI stack: Sales Value and Headroom (with % of Potential)
+    with left:
+        try:
+            currency = (scoring_cfg.get("formatting", {}) if 'scoring_cfg' in globals() else {}).get("headroom_currency", "EUR")
+        except Exception:
+            currency = "EUR"
+        potential_units_top = float(rt.get("Potential_Units", 0.0))
+        headroom_units_top = float(rt.get("Headroom_Units", 0.0))
+        headroom_value_top = float(rt.get("Headroom_Value", 0.0))
+        sales_value_top = float(rt.get("units_sold", 0.0)) * float(rt.get("price_per_unit", 0.0))
+        pct_headroom = (headroom_units_top / potential_units_top) if potential_units_top > 0 else 0.0
+        st.metric(f"Sales Value ({currency})", f"{sales_value_top:,.0f}")
+        st.metric(f"Headroom ({currency})", f"{headroom_value_top:,.0f}", delta=f"{pct_headroom:.0%} of Potential")
+    with mid:
+        patients_total = float(rt["patients_total"])
+        patients_eligible = float(rt["patients_eligible"])
+        units_sold = float(rt["units_sold"])
+
+        funnel_stages = [
+            "Total Patient Population",
+            "Eligible Patients",
+            "Treated Patients (brand)",
+        ]
+        funnel_values = [patients_total, patients_eligible, units_sold]
+        hover_text = [
+            "Epidemiology base (incidence/prevalence)",
+            "Meet label/guideline criteria for the brand",
+            "On selected brand’s therapy in the period (proxied by that brand’s units sold)",
+        ]
+
+        fig_top = go.Figure(go.Funnel(
+            y=funnel_stages,
+            x=funnel_values,
+            textposition="inside",
+            textinfo="value+percent initial",
+            hoverinfo="text+name",
+            textfont=dict(color="white"),
+            hovertext=hover_text,
+            marker={"color": ["#4C78A8", "#72B7B2", "#54A24B"]},
+        ))
+        fig_top.update_layout(height=420, width=720, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig_top, use_container_width=False)
+        st.caption(f"Period: {sel_quarter}. Note: 'Accessible Patients' is modeled via Access_Score in v1 and not shown as a separate funnel stage.")
+
+        with st.expander("Funnel definitions"):
+            st.markdown(
+                """
+                - a) Total Patient Population — epidemiology base (incidence/prevalence)
+                - b) Eligible Patients — meet label/guideline criteria for the brand
+                - c) Accessible Patients — within payer coverage/reimbursement constraints (modeled via Access_Score in v1)
+                - d) Treated Patients — on the selected brand’s therapy in the period (proxied by that brand’s units sold)
+                - e) Sales (Units × Price) — commercial output from treated units at net price
+                - f) Headroom = Potential – Actual — gap between potential treated and actual treated; size of prize (units and €)
+                - Note: Adoption Ceiling caps Potential_Units (patients_eligible × adoption_ceiling). Access_Score is an ease proxy used in Priority ranking (not a v1 cap on potential).
+                """
+            )
+
 st.subheader("Market Metrics (Ranked)")
 df_display = view if "DQ_Missing" not in view.columns else view[~view["DQ_Missing"]]
-st.dataframe(df_display.sort_values("ROI_Score", ascending=False), use_container_width=True)
+# Display-friendly column name for ROI_Score
+df_display_sorted = df_display.sort_values("ROI_Score", ascending=False)
+df_display_sorted = df_display_sorted.rename(columns={"ROI_Score": "Priority_Score"})
+# Add Reach to the table for quick scan if available
+if "Reach_s" in df_display_sorted.columns:
+    try:
+        df_display_sorted["Reach (0–1)"] = df_display_sorted["Reach_s"].astype(float).round(2)
+    except Exception:
+        # fallback: leave as-is if conversion fails
+        df_display_sorted["Reach (0–1)"] = df_display_sorted["Reach_s"]
+st.dataframe(df_display_sorted, use_container_width=True)
+with st.expander("How to read this table (Ceiling vs Access vs Reach)"):
+    st.markdown(
+        """
+        **What you’re seeing**  
+        A ranked view of markets/brands by **Priority Score (0–1)**.  
+        Higher score = bigger prize, easier access, and better coverage.  
+
+        **How the story builds**  
+        1. 🔺 **Potential (size):** Adoption Ceiling caps eligible patients →  
+           `Potential = Eligible × Adoption_Ceiling`.  
+        2. 🟩 **Headroom (prize):** Untapped gap between Potential and Actual treated → shown in **units** and **value**.  
+        3. 🔓📣 **Ease & coverage:**  
+           - 🔓 **Access_Score** = payer/reimbursement ease.  
+           - 📣 **Reach** = execution coverage (`customers_reached / customers_targeted` → scaled to `Reach_s`).  
+           In v1, Access and Reach do *not* cap potential; they guide prioritization.  
+        4. ⭐ **Priority (blend):**  
+           `Priority = 0.5·HR_s + 0.3·(Acc_s·(1+Growth)) + 0.2·Reach_s` (defaults).  
+           All components normalized 0–1 within the current dataset.  
+
+        ```text
+        Potential
+          └─ Headroom (Potential − Actual)
+              └─ Access & Reach (ease & coverage)
+                  └─ Priority (blend)
+        ```
+
+        **How to use it**  
+        Sort by **Priority**, then scan **Access** and **Reach** to see:  
+        - 🔓 Is the gap blocked by **payer constraints**?  
+        - 📣 Is it limited by **execution/coverage**?  
+        - 🔺/🟩 Or is it simply a **large but already well-served** market?  
+
+        **Learn more**  
+        See [business_logic.md](docs/business_logic.md) and [data_usage.md](docs/data_usage.md).
+        """
+    )
 
 row = metrics[(metrics["market"] == sel_market) & (metrics["brand"] == sel_brand) & (metrics["quarter"] == sel_quarter)]
 if row.empty:
@@ -103,8 +214,10 @@ else:
     fmt = scoring_cfg.get("formatting", {})
     currency = fmt.get("headroom_currency", "EUR")
 
-    # KPI badges (Sales, Headroom first), Access gauge to the right
+    # KPI badges (Sales, Headroom), and the Access, Reach, Priority gauges
     sr_access = float(r.get("access_score", 0.0))
+    sr_reach = float(r.get("Reach_s", 0.0))
+    sr_roi = float(r.get("ROI_Score", 0.0))
     sr_sales_value = float(r.get("units_sold", 0.0)) * float(r.get("price_per_unit", 0.0))
     sr_headroom_value = float(r.get("Headroom_Value", 0.0))
 
@@ -112,10 +225,9 @@ else:
     thr_acc = float(thr_cfg.get("accelerate", 0.70))
     thr_nur = float(thr_cfg.get("nurture", 0.50))
 
-    b1, b2, b3 = st.columns([1, 1, 2])
-    b1.metric(f"Sales Value ({currency})", f"{sr_sales_value:,.0f}")
-    b2.metric(f"Headroom ({currency})", f"{sr_headroom_value:,.0f}")
-    with b3:
+    # KPI badges were moved next to the Funnel at the top to start the story
+    g1, g2, g3 = st.columns(3)
+    with g1:
         gfig = go.Figure(go.Indicator(
             mode="gauge+number",
             value=sr_access,
@@ -134,49 +246,83 @@ else:
         gfig.update_layout(height=180, margin=dict(l=10, r=10, t=10, b=0))
         st.markdown("**Access (0–1)**")
         st.plotly_chart(gfig, use_container_width=True)
-    # Centered Funnel section
-    st.subheader("Funnel – Patients to Units")
-    left, mid, right = st.columns([1, 2, 1])
-    with mid:
-        patients_total = float(r["patients_total"])
-        patients_eligible = float(r["patients_eligible"])
-        units_sold = float(r["units_sold"])
-
-        funnel_stages = [
-            "Total Patient Population",
-            "Eligible Patients",
-            "Treated Patients (brand)",
-        ]
-        funnel_values = [patients_total, patients_eligible, units_sold]
-        hover_text = [
-            "Epidemiology base (incidence/prevalence)",
-            "Meet label/guideline criteria for the brand",
-            "On selected brand’s therapy in the period (proxied by that brand’s units sold)",
-        ]
-
-        fig = go.Figure(go.Funnel(
-            y=funnel_stages,
-            x=funnel_values,
-            textposition="inside",
-            textinfo="value+percent initial",
-            hoverinfo="text+name",
-            textfont=dict(color="white"),
-            hovertext=hover_text,
-            marker={"color": ["#4C78A8", "#72B7B2", "#54A24B"]},
-        ))
-        fig.update_layout(height=420, width=720, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=False)
-        st.caption(f"Period: {sel_quarter}. Note: 'Accessible Patients' is modeled via Access_Score in v1 and not shown as a separate funnel stage.")
-
-        with st.expander("Funnel definitions"):
+        with st.expander("What is Access Score?"):
             st.markdown(
                 """
-                - a) Total Patient Population — epidemiology base (incidence/prevalence)
-                - b) Eligible Patients — meet label/guideline criteria for the brand
-                - c) Accessible Patients — within payer coverage/reimbursement constraints (modeled via Access_Score in v1)
-                - d) Treated Patients — on the selected brand’s therapy in the period (proxied by that brand’s units sold)
-                - e) Sales (Units × Price) — commercial output from treated units at net price
-                - f) Headroom = Potential – Actual — gap between potential treated and actual treated; size of prize (units and €)
+                - Access Score is a 0–1 proxy for how easy it is to capture headroom given payer/reimbursement conditions.
+                - Higher = easier to win patients (e.g., fewer restrictions, better coverage, simpler prior auth).
+                - We use it as the "ease-of-capture" component inside the Priority Score.
+                - Contrast with Adoption Ceiling: Adoption Ceiling caps Potential_Units (volume). Access does not change Potential_Units in v1; it affects Priority (ordering). An explicit `accessible_fraction` could cap potential in v2.
+                - See docs: `headroom/docs/glossary.md`, `headroom/docs/data_usage.md`.
+                """
+            )
+    with g2:
+        rchfig = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=sr_reach,
+            number={"valueformat": ".2f"},
+            title={"text": ""},
+            gauge={
+                "axis": {"range": [0, 1]},
+                "bar": {"color": "#72B7B2"},
+                "steps": [
+                    {"range": [0, max(0.0, min(thr_nur, 1.0))], "color": "#FDE2E1"},
+                    {"range": [max(0.0, min(thr_nur, 1.0)), max(0.0, min(thr_acc, 1.0))], "color": "#FFE9C6"},
+                    {"range": [max(0.0, min(thr_acc, 1.0)), 1], "color": "#DDF2E0"},
+                ],
+            },
+        ))
+        rchfig.update_layout(height=180, margin=dict(l=10, r=10, t=10, b=0))
+        st.markdown("**Reach (0–1)**")
+        st.plotly_chart(rchfig, use_container_width=True)
+        with st.expander("How is Reach computed?"):
+            st.markdown(
+                """
+                - Reach measures the fraction of targeted customers reached in the period.
+                - Raw reach = customers_reached / customers_targeted (safe-handled when targeted is 0).
+                - We normalize to 0–1 across the dataset (Reach_s) for comparability.
+                - Reach complements Access by capturing execution/coverage.
+                """
+            )
+    with g3:
+        rfig = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=sr_roi,
+            number={"valueformat": ".2f"},
+            title={"text": ""},
+            gauge={
+                "axis": {"range": [0, 1]},
+                "bar": {"color": "#54A24B"},
+                "steps": [
+                    {"range": [0, max(0.0, min(thr_nur, 1.0))], "color": "#FDE2E1"},
+                    {"range": [max(0.0, min(thr_nur, 1.0)), max(0.0, min(thr_acc, 1.0))], "color": "#FFE9C6"},
+                    {"range": [max(0.0, min(thr_acc, 1.0)), 1], "color": "#DDF2E0"},
+                ],
+            },
+        ))
+        rfig.update_layout(height=180, margin=dict(l=10, r=10, t=10, b=0))
+        st.markdown("**Priority Score (0–1)**")
+        st.plotly_chart(rfig, use_container_width=True)
+        with st.expander("How do we compute Priority Score?"):
+            st.markdown(
+                """
+                Plain English:
+                - We combine three ideas:
+                  - Size of prize: bigger Headroom Value → higher score.
+                  - Ease of capture: higher Access Score → higher score.
+                  - Execution/coverage: higher Reach → higher score.
+                - If the market is growing, we give a modest boost to the ease-of-capture part.
+                - We normalize numbers to 0–1 so scores are comparable within the current dataset.
+                - We then blend them using configurable weights.
+
+                Compact formula (for reference):
+                - Priority = w_hr × HR_s + w_sig × (Sig_s × (1 + growth_effect)) + w_reach × Reach_s
+                  - HR_s = scaled Headroom_Value (0–1)
+                  - Sig_s = scaled Access Score (0–1)
+                  - Reach_s = scaled Reach (customers_reached/customers_targeted) (0–1)
+                  - growth_effect = clipped growth_trend (negatives floored)
+                - Defaults: w_hr=0.5, w_sig=0.3, w_reach=0.2. Configure weights and growth floor in `headroom/config/scoring.yaml`.
+                - Details: `headroom/docs/business_logic.md` → Priority Score.
                 """
             )
 

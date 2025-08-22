@@ -1,6 +1,7 @@
 weights:
-  headroom_value: 0.6
-  access_signal: 0.4
+  headroom_value: 0.5
+  access_signal: 0.3
+  reach_signal: 0.2  # v1: direct reach KPI included in Priority Score
 growth_clip_min: 0.0
 thresholds:
   accelerate: 0.70

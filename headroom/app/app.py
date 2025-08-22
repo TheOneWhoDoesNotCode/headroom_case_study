@@ -54,13 +54,24 @@ with st.sidebar:
     apply_filters = st.checkbox("Apply filters to views", value=True)
     st.divider()
     st.subheader("Help & Docs")
-    st.markdown(
-        """
-        - [Business Logic](../docs/business_logic.md)
-        - [Data Usage](../docs/data_usage.md)
-        - [Glossary](../docs/glossary.md)
-        """
-    )
+    try:
+        bl_path = os.path.join(BASE_DIR, "docs", "business_logic.md")
+        du_path = os.path.join(BASE_DIR, "docs", "data_usage.md")
+        gl_path = os.path.join(BASE_DIR, "docs", "glossary.md")
+        with open(bl_path, "r", encoding="utf-8") as f:
+            bl_md = f.read()
+        with open(du_path, "r", encoding="utf-8") as f:
+            du_md = f.read()
+        with open(gl_path, "r", encoding="utf-8") as f:
+            gl_md = f.read()
+        with st.expander("Business Logic"):
+            st.markdown(bl_md)
+        with st.expander("Data Usage"):
+            st.markdown(du_md)
+        with st.expander("Glossary"):
+            st.markdown(gl_md)
+    except Exception:
+        st.caption("Docs not available.")
 
 metrics = compute_metrics(data["markets"], data["actuals"], data["drivers"], scoring_cfg=scoring_cfg)
 
@@ -123,10 +134,10 @@ else:
         gfig.update_layout(height=180, margin=dict(l=10, r=10, t=10, b=0))
         st.markdown("**Access (0–1)**")
         st.plotly_chart(gfig, use_container_width=True)
-    # Top row: Funnel (left) and Decomposition (right)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Funnel – Patients to Units")
+    # Centered Funnel section
+    st.subheader("Funnel – Patients to Units")
+    left, mid, right = st.columns([1, 2, 1])
+    with mid:
         patients_total = float(r["patients_total"])
         patients_eligible = float(r["patients_eligible"])
         units_sold = float(r["units_sold"])
@@ -153,8 +164,8 @@ else:
             hovertext=hover_text,
             marker={"color": ["#4C78A8", "#72B7B2", "#54A24B"]},
         ))
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(height=420, width=720, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=False)
         st.caption(f"Period: {sel_quarter}. Note: 'Accessible Patients' is modeled via Access_Score in v1 and not shown as a separate funnel stage.")
 
         with st.expander("Funnel definitions"):
@@ -169,106 +180,108 @@ else:
                 """
             )
 
-    with c2:
-        # Past Performance Decomposition (Waterfall)
-        st.subheader("Past Performance Decomposition – ΔSales components")
-        # Build current and previous quarter context for selected market/brand
-        brand_hist = metrics[metrics["market"].eq(sel_market)].copy()
-        if not brand_hist.empty:
-            # Sort quarters reliably (expects format YYYYQx)
+    # Past Performance Decomposition (Waterfall) moved below the funnel
+    st.subheader("Past Performance Decomposition – ΔSales components")
+    # Build current and previous quarter context for selected market/brand
+    brand_hist = metrics[metrics["market"].eq(sel_market)].copy()
+    if not brand_hist.empty:
+        # Sort quarters reliably (expects format YYYYQx)
+        try:
+            brand_hist["_q_sort"] = brand_hist["quarter"].astype(str).apply(lambda q: (int(q[:4]), int(q[-1:])))
+            brand_hist = brand_hist.sort_values(["brand", "_q_sort"])  # ensure per-brand order
+        except Exception:
+            brand_hist = brand_hist.sort_values(["brand", "quarter"])  # fallback
+
+        # Pick latest available quarter for the selected brand
+        bh = brand_hist[brand_hist["brand"].eq(sel_brand)]
+        if len(bh) >= 2:
+            # Determine t (latest) and t-1
             try:
-                brand_hist["_q_sort"] = brand_hist["quarter"].astype(str).apply(lambda q: (int(q[:4]), int(q[-1:])))
-                brand_hist = brand_hist.sort_values(["brand", "_q_sort"])  # ensure per-brand order
+                q_list = sorted(bh["quarter"].unique().tolist(), key=lambda q: (int(str(q)[:4]), int(str(q)[-1:])))
             except Exception:
-                brand_hist = brand_hist.sort_values(["brand", "quarter"])  # fallback
+                q_list = list(bh["quarter"].unique().tolist())
+            q_t = q_list[-1]
+            q_tm1 = q_list[-2]
 
-            # Pick latest available quarter for the selected brand
-            bh = brand_hist[brand_hist["brand"].eq(sel_brand)]
-            if len(bh) >= 2:
-                # Determine t (latest) and t-1
-                try:
-                    q_list = sorted(bh["quarter"].unique().tolist(), key=lambda q: (int(str(q)[:4]), int(str(q)[-1:])))
-                except Exception:
-                    q_list = list(bh["quarter"].unique().tolist())
-                q_t = q_list[-1]
-                q_tm1 = q_list[-2]
+            b_t = bh[bh["quarter"].eq(q_t)].iloc[0]
+            b_tm1 = bh[bh["quarter"].eq(q_tm1)].iloc[0]
 
-                b_t = bh[bh["quarter"].eq(q_t)].iloc[0]
-                b_tm1 = bh[bh["quarter"].eq(q_tm1)].iloc[0]
-
-                Units_b_t = float(b_t["units_sold"])
-                Units_b_tm1 = float(b_tm1["units_sold"])
+            Units_b_t = float(b_t["units_sold"])
+            Units_b_tm1 = float(b_tm1["units_sold"])
                 # Prefer net price if net_sales present
-                def _price(row):
-                    try:
-                        if "net_sales" in row.index and pd.notna(row["net_sales"]) and row["units_sold"] not in (0, None):
-                            return float(row["net_sales"]) / float(row["units_sold"]) if float(row["units_sold"]) != 0 else float(row.get("price_per_unit", 0.0))
-                    except Exception:
-                        pass
-                    return float(row.get("price_per_unit", 0.0))
+            def _price(row):
+                try:
+                    if "net_sales" in row.index and pd.notna(row["net_sales"]) and row["units_sold"] not in (0, None):
+                        return float(row["net_sales"]) / float(row["units_sold"]) if float(row["units_sold"]) != 0 else float(row.get("price_per_unit", 0.0))
+                except Exception:
+                    pass
+                return float(row.get("price_per_unit", 0.0))
 
-                Price_b_t = _price(b_t)
-                Price_b_tm1 = _price(b_tm1)
-                Sales_b_t = Units_b_t * Price_b_t
-                Sales_b_tm1 = Units_b_tm1 * Price_b_tm1
+            Price_b_t = _price(b_t)
+            Price_b_tm1 = _price(b_tm1)
+            Sales_b_t = Units_b_t * Price_b_t
+            Sales_b_tm1 = Units_b_tm1 * Price_b_tm1
 
-                # Market totals per quarter (sum across brands in same market)
-                mkt = metrics[metrics["market"].eq(sel_market)]
-                Units_m_t = float(mkt[mkt["quarter"].eq(q_t)]["units_sold"].sum())
-                Units_m_tm1 = float(mkt[mkt["quarter"].eq(q_tm1)]["units_sold"].sum())
+            # Market totals per quarter (sum across brands in same market)
+            mkt = metrics[metrics["market"].eq(sel_market)]
+            Units_m_t = float(mkt[mkt["quarter"].eq(q_t)]["units_sold"].sum())
+            Units_m_tm1 = float(mkt[mkt["quarter"].eq(q_tm1)]["units_sold"].sum())
 
-                Share_tm1 = (Units_b_tm1 / Units_m_tm1) if Units_m_tm1 > 0 else 0.0
-                Share_t = (Units_b_t / Units_m_t) if Units_m_t > 0 else 0.0
+            Share_tm1 = (Units_b_tm1 / Units_m_tm1) if Units_m_tm1 > 0 else 0.0
+            Share_t = (Units_b_t / Units_m_t) if Units_m_t > 0 else 0.0
 
-                MarketEff = (Units_m_t - Units_m_tm1) * Share_tm1 * Price_b_tm1
-                ShareEff = (Share_t - Share_tm1) * Units_m_t * Price_b_tm1
-                PriceEff = (Price_b_t - Price_b_tm1) * Units_b_t
-                DeltaSales = Sales_b_t - Sales_b_tm1
-                Residual = DeltaSales - (MarketEff + ShareEff + PriceEff)
+            MarketEff = (Units_m_t - Units_m_tm1) * Share_tm1 * Price_b_tm1
+            ShareEff = (Share_t - Share_tm1) * Units_m_t * Price_b_tm1
+            PriceEff = (Price_b_t - Price_b_tm1) * Units_b_t
+            DeltaSales = Sales_b_t - Sales_b_tm1
+            Residual = DeltaSales - (MarketEff + ShareEff + PriceEff)
 
-                hovertexts = [
-                    f"Market Growth: ΔMarketUnits={Units_m_t-Units_m_tm1:,.0f} · Share(t-1)={Share_tm1:.2%} · Price(t-1)={Price_b_tm1:,.2f}",
-                    f"Patient Share: ΔShare={Share_t-Share_tm1:.2%} · MarketUnits(t)={Units_m_t:,.0f} · Price(t-1)={Price_b_tm1:,.2f}",
-                    f"Price: ΔPrice={Price_b_t-Price_b_tm1:,.2f} · Units(t)={Units_b_t:,.0f}",
-                    f"Residual: ΔSales − (Market+Share+Price)",
-                    f"ΔSales: Sales(t)−Sales(t-1)={Sales_b_t:,.0f}−{Sales_b_tm1:,.0f}",
-                ]
-                wf = go.Figure(go.Waterfall(
-                    name="ΔSales",
-                    orientation="v",
-                    measure=["relative", "relative", "relative", "relative", "total"],
-                    x=["Market Growth", "Patient Share", "Price", "Other/Residual", "ΔSales"],
-                    textposition="outside",
-                    text=[f"{MarketEff:,.0f}", f"{ShareEff:,.0f}", f"{PriceEff:,.0f}", f"{Residual:,.0f}", f"{DeltaSales:,.0f}"],
-                    y=[MarketEff, ShareEff, PriceEff, Residual, DeltaSales],
-                    connector={"line": {"color": "#A0A0A0"}},
-                    hovertext=hovertexts,
-                    hoverinfo="text+name",
-                ))
-                wf.update_layout(
-                    height=420,
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    yaxis=dict(rangemode="tozero"),
-                )
-                st.plotly_chart(wf, use_container_width=True)
-                st.caption(
-                    f"Decomposition period: {q_tm1} → {q_t} (brand: {sel_brand}, market: {sel_market}) · "
-                    f"Share: {Share_tm1:.2%} → {Share_t:.2%} · Market Units: {Units_m_tm1:,.0f} → {Units_m_t:,.0f} · "
-                    f"Price basis: {'net' if ('net_sales' in metrics.columns) else 'list'}"
-                )
+            hovertexts = [
+                f"Market Growth: ΔMarketUnits={Units_m_t-Units_m_tm1:,.0f} · Share(t-1)={Share_tm1:.2%} · Price(t-1)={Price_b_tm1:,.2f}",
+                f"Patient Share: ΔShare={Share_t-Share_tm1:.2%} · MarketUnits(t)={Units_m_t:,.0f} · Price(t-1)={Price_b_tm1:,.2f}",
+                f"Price: ΔPrice={Price_b_t-Price_b_tm1:,.2f} · Units(t)={Units_b_t:,.0f}",
+                f"Residual: ΔSales − (Market+Share+Price)",
+                f"ΔSales: Sales(t)−Sales(t-1)={Sales_b_t:,.0f}−{Sales_b_tm1:,.0f}",
+            ]
+            wf = go.Figure(go.Waterfall(
+                name="ΔSales",
+                orientation="v",
+                measure=["relative", "relative", "relative", "relative", "total"],
+                x=["Market Growth", "Patient Share", "Price", "Other/Residual", "ΔSales"],
+                textposition="outside",
+                text=[f"{MarketEff:,.0f}", f"{ShareEff:,.0f}", f"{PriceEff:,.0f}", f"{Residual:,.0f}", f"{DeltaSales:,.0f}"],
+                y=[MarketEff, ShareEff, PriceEff, Residual, DeltaSales],
+                connector={"line": {"color": "#A0A0A0"}},
+                hovertext=hovertexts,
+                hoverinfo="text+name",
+            ))
+            wf.update_layout(
+                height=420,
+                width=720,
+                margin=dict(l=10, r=10, t=10, b=10),
+                yaxis=dict(rangemode="tozero"),
+            )
+            dl, dm, dr = st.columns([1, 2, 1])
+            with dm:
+                st.plotly_chart(wf, use_container_width=False)
+            st.caption(
+                f"Decomposition period: {q_tm1} → {q_t} (brand: {sel_brand}, market: {sel_market}) · "
+                f"Share: {Share_tm1:.2%} → {Share_t:.2%} · Market Units: {Units_m_tm1:,.0f} → {Units_m_t:,.0f} · "
+                f"Price basis: {'net' if ('net_sales' in metrics.columns) else 'list'}"
+            )
 
-                with st.expander("Decomposition inputs"):
-                    st.write({
-                        "Units_brand": {str(q_tm1): Units_b_tm1, str(q_t): Units_b_t},
-                        "Price": {str(q_tm1): Price_b_tm1, str(q_t): Price_b_t},
-                        "Sales": {str(q_tm1): Sales_b_tm1, str(q_t): Sales_b_t},
-                        "Market_Units": {str(q_tm1): Units_m_tm1, str(q_t): Units_m_t},
-                        "Share": {str(q_tm1): Share_tm1, str(q_t): Share_t},
-                    })
-            else:
-                st.info("Not enough history to decompose past performance (need at least two quarters).")
+            with st.expander("Decomposition inputs"):
+                st.write({
+                    "Units_brand": {str(q_tm1): Units_b_tm1, str(q_t): Units_b_t},
+                    "Price": {str(q_tm1): Price_b_tm1, str(q_t): Price_b_t},
+                    "Sales": {str(q_tm1): Sales_b_tm1, str(q_t): Sales_b_t},
+                    "Market_Units": {str(q_tm1): Units_m_tm1, str(q_t): Units_m_t},
+                    "Share": {str(q_tm1): Share_tm1, str(q_t): Share_t},
+                })
         else:
-            st.info("No data available to compute decomposition.")
+            st.info("Not enough history to decompose past performance (need at least two quarters).")
+    else:
+        st.info("No data available to compute decomposition.")
 
     # Below: Trend grid (2x2) for Sales, Headroom, Price, Patient Share
     st.subheader("Trends – Sales, Headroom, Price, Patient Share")

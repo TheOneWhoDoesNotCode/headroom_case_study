@@ -47,9 +47,12 @@ with st.sidebar:
     sel_market = st.selectbox("Market", unique_markets)
     brands = sorted(data["markets"][data["markets"]["market"] == sel_market]["brand"].unique())
     sel_brand = st.selectbox("Brand", brands)
-    quarters = sorted(
-        data["markets"][(data["markets"]["market"] == sel_market) & (data["markets"]["brand"] == sel_brand)]["quarter"].unique()
-    )
+    quarters_raw = data["markets"][ (data["markets"]["market"] == sel_market) & (data["markets"]["brand"] == sel_brand) ]["quarter"].unique()
+    # Sort quarters descending (expects format like YYYYQx)
+    try:
+        quarters = sorted(list(quarters_raw), key=lambda q: (int(str(q)[:4]), int(str(q)[-1])), reverse=True)
+    except Exception:
+        quarters = sorted(list(quarters_raw), reverse=True)
     sel_quarter = st.selectbox("Quarter", quarters)
     apply_filters = st.checkbox("Apply filters to views", value=True)
     st.divider()
@@ -74,6 +77,63 @@ with st.sidebar:
         st.caption("Docs not available.")
 
 metrics = compute_metrics(data["markets"], data["actuals"], data["drivers"], scoring_cfg=scoring_cfg)
+# Consistent naming across UI: use Priority_Score everywhere
+if "ROI_Score" in metrics.columns:
+    metrics = metrics.rename(columns={"ROI_Score": "Priority_Score"})
+
+def _resolve_units_per_patient(sc_cfg: dict, market: str, brand: str) -> float:
+    """Resolve units-per-patient conversion with precedence:
+    1) assumptions.units_per_patient_equiv_by.market_brand["{market}::{brand}"]
+    2) assumptions.units_per_patient_equiv_by.brand[brand]
+    3) assumptions.units_per_patient_equiv_by.market[market]
+    4) assumptions.units_per_patient_equiv (global default, default=1.0)
+
+    Also supports nested map: assumptions.units_per_patient_equiv_by[market][brand].
+    """
+    assumptions = (sc_cfg or {}).get("assumptions", {})
+    default = float(assumptions.get("units_per_patient_equiv", 1.0))
+    by = assumptions.get("units_per_patient_equiv_by", {}) or {}
+    # exact market_brand key
+    try:
+        mb = by.get("market_brand", {}) or {}
+        key = f"{market}::{brand}"
+        if key in mb:
+            return float(mb[key])
+    except Exception:
+        pass
+    # nested structure by market then brand
+    try:
+        nested = by.get("by_market", {}) or {}
+        if market in nested:
+            if isinstance(nested[market], dict) and brand in nested[market]:
+                return float(nested[market][brand])
+    except Exception:
+        pass
+    # brand-only override
+    try:
+        bmap = by.get("brand", {}) or {}
+        if brand in bmap:
+            return float(bmap[brand])
+    except Exception:
+        pass
+    # market-only override
+    try:
+        mmap = by.get("market", {}) or {}
+        if market in mmap:
+            return float(mmap[market])
+    except Exception:
+        pass
+    return default
+
+# Resolve per selection
+units_per_patient = _resolve_units_per_patient(scoring_cfg, sel_market, sel_brand)
+
+# Quarter sorting helper (robust)
+def _q_key(q):
+    s = str(q).strip().upper().replace(" ", "")
+    year = int(s[:4])
+    qtr = int(s[-1])
+    return (year, qtr)
 
 # Data-quality surface: warn and exclude missing rows from main ranking by default
 dq_missing_count = int(metrics["DQ_Missing"].sum()) if "DQ_Missing" in metrics.columns else 0
@@ -96,25 +156,20 @@ if row_top.empty:
     st.info("No data for selection.")
 else:
     rt = row_top.iloc[0]
-    st.subheader("Funnel – Patients to Units")
-    left, mid, right = st.columns([1, 2, 1])
-    # Left KPI stack: Sales Value and Headroom (with % of Potential)
-    with left:
-        try:
-            currency = (scoring_cfg.get("formatting", {}) if 'scoring_cfg' in globals() else {}).get("headroom_currency", "EUR")
-        except Exception:
-            currency = "EUR"
-        potential_units_top = float(rt.get("Potential_Units", 0.0))
-        headroom_units_top = float(rt.get("Headroom_Units", 0.0))
-        headroom_value_top = float(rt.get("Headroom_Value", 0.0))
-        sales_value_top = float(rt.get("units_sold", 0.0)) * float(rt.get("price_per_unit", 0.0))
-        pct_headroom = (headroom_units_top / potential_units_top) if potential_units_top > 0 else 0.0
-        st.metric(f"Sales Value ({currency})", f"{sales_value_top:,.0f}")
-        st.metric(f"Headroom ({currency})", f"{headroom_value_top:,.0f}", delta=f"{pct_headroom:.0%} of Potential")
-    with mid:
+    # Side-by-side layout: Funnel (left) and Headroom (right)
+    col_funnel, col_headroom = st.columns(2)
+
+    # Left: Funnel – Patients to Units
+    with col_funnel:
+        st.subheader("Funnel – Patients to Units")
         patients_total = float(rt["patients_total"])
         patients_eligible = float(rt["patients_eligible"])
         units_sold = float(rt["units_sold"])
+        # Units conversion factor (guarded) used consistently across visuals
+        try:
+            units_per_patient = float(rt.get("units_per_patient", 1.0))
+        except Exception:
+            units_per_patient = 1.0
 
         funnel_stages = [
             "Total Patient Population",
@@ -138,28 +193,233 @@ else:
             hovertext=hover_text,
             marker={"color": ["#4C78A8", "#72B7B2", "#54A24B"]},
         ))
-        fig_top.update_layout(height=420, width=720, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig_top, use_container_width=False)
-        st.caption(f"Period: {sel_quarter}. Note: 'Accessible Patients' is modeled via Access_Score in v1 and not shown as a separate funnel stage.")
-
+        fig_top.update_layout(height=420, margin=dict(l=20, r=20, t=10, b=10))
+        fig_top.update_xaxes(automargin=True)
+        fig_top.update_yaxes(automargin=True)
+        st.plotly_chart(fig_top, use_container_width=True)
+        # Place concise conversion note under the Funnel
+        st.caption(f"Units conversion: patients × {units_per_patient:.2f} = units. 'Treated Patients (brand)' reflects units sold.")
+        # Explanation drop bar (expander) under Funnel
         with st.expander("Funnel definitions"):
             st.markdown(
                 """
-                - a) Total Patient Population — epidemiology base (incidence/prevalence)
-                - b) Eligible Patients — meet label/guideline criteria for the brand
-                - c) Accessible Patients — within payer coverage/reimbursement constraints (modeled via Access_Score in v1)
-                - d) Treated Patients — on the selected brand’s therapy in the period (proxied by that brand’s units sold)
-                - e) Sales (Units × Price) — commercial output from treated units at net price
-                - f) Headroom = Potential – Actual — gap between potential treated and actual treated; size of prize (units and €)
-                - Note: Adoption Ceiling caps Potential_Units (patients_eligible × adoption_ceiling). Access_Score is an ease proxy used in Priority ranking (not a v1 cap on potential).
+                - Total Patient Population: epidemiology base (incidence/prevalence)
+                - Eligible Patients: meet label/guideline criteria for the brand
+                - Treated Patients (brand): patients on selected brand in period (proxied by units)
+                - Units are patients × conversion factor
                 """
             )
 
+    # Right: Headroom – Today (units)
+    with col_headroom:
+        st.subheader("Headroom – Today (units)")
+        # Pull inputs safely
+        pot_val = rt.get("Potential_Units")
+        act_val = rt.get("units_sold")
+        hdr_val = rt.get("Headroom_Units")
+        price_val = rt.get("price_per_unit")
+        # Validate essentials
+        if any(v is None for v in [pot_val, act_val, hdr_val]):
+            st.info("Headroom waterfall unavailable (missing Potential/Actual/Headroom).")
+        else:
+            pot = float(pot_val) if pd.notna(pot_val) else 0.0
+            act = float(act_val) if pd.notna(act_val) else 0.0
+            hdr_u = float(hdr_val) if pd.notna(hdr_val) else max(pot - act, 0.0)
+            price = float(price_val) if (price_val is not None and pd.notna(price_val)) else 0.0
+            hdr_v = hdr_u * price
+
+            fig_hw = go.Figure(go.Waterfall(
+                measure=["relative", "relative", "total"],
+                x=["Actual (u)", "Headroom (u)", "Total Potential (u)"],
+                y=[act, hdr_u, pot],
+                text=[f"{act:,.0f}", f"{hdr_u:,.0f}", f"{pot:,.0f}"],
+                textposition="inside",
+                connector={"line": {"color": "#AAA"}},
+                # Use Waterfall color APIs: increasing/decreasing/totals
+                increasing={"marker": {"color": "#54A24B"}},   # Actual & Headroom (positive) both green to match Treated Patients
+                decreasing={"marker": {"color": "#E45756"}},   # if any negative
+                totals={"marker": {"color": "#1F77B4"}},       # Total Potential
+            ))
+            fig_hw.update_layout(
+                height=420,
+                margin=dict(l=20, r=20, t=10, b=10),
+                yaxis=dict(rangemode="tozero"),
+                xaxis=dict(categoryorder="array", categoryarray=["Actual (u)", "Headroom (u)", "Total Potential (u)"]),
+                uniformtext_minsize=10,
+                uniformtext_mode="hide",
+            )
+            # Hide axis descriptions on Headroom chart for a cleaner look
+            fig_hw.update_xaxes(automargin=True, showticklabels=False, ticks="")
+            fig_hw.update_yaxes(automargin=True, showticklabels=False, showgrid=False, zeroline=False)
+            st.plotly_chart(fig_hw, use_container_width=True)
+            # Place concise conversion note under the Headroom waterfall
+            st.caption(f"All bars in units. Same conversion factor applied: {units_per_patient:.2f} units per patient.")
+            # Explanation drop bar (expander) under Headroom
+            with st.expander("Headroom definitions"):
+                st.markdown(
+                    """
+                    - Actual (u): units sold in the selected period
+                    - Headroom (u): Potential − Actual (clipped at 0)
+                    - Total Potential (u): eligible × adoption ceiling converted to units
+                    - Composition: Actual + Headroom = Total Potential
+                    """
+                )
+            # KPIs under chart to preserve same chart width
+            try:
+                currency = (scoring_cfg.get("formatting", {}) if 'scoring_cfg' in globals() else {}).get("headroom_currency", "EUR")
+            except Exception:
+                currency = "EUR"
+            sales_value_top = float(rt.get('units_sold', 0.0)) * float(rt.get('price_per_unit', 0.0))
+            headroom_value_top = float(rt.get('Headroom_Value', 0.0))
+            total_potential_value = sales_value_top + headroom_value_top
+            growth_pct = (headroom_value_top / total_potential_value * 100.0) if total_potential_value > 0 else 0.0
+            kL, kM, kR = st.columns(3)
+            with kL:
+                st.metric(f"Sales Value ({currency})", f"{sales_value_top:,.0f}")
+            with kM:
+                st.metric("Growth Potential (%)", f"{growth_pct:.1f}%")
+            with kR:
+                st.metric(f"Headroom ({currency})", f"{headroom_value_top:,.0f}")
+
+    st.subheader("ΔSales – Last Period (€)")
+    # ΔSales last period (Market + Share + Price + Residual) — centered under Headroom
+    cL3, cM3, cR3 = st.columns([1, 2, 1])
+    with cM3:
+        try:
+            brand_hist = metrics[metrics["market"].eq(sel_market)].copy()
+            bh = brand_hist[brand_hist["brand"].eq(sel_brand)].copy()
+            if len(bh) >= 1:
+                # sort quarters safely
+                bh["_q_sort"] = bh["quarter"].astype(str).apply(_q_key)
+                bh = bh.sort_values("_q_sort")
+                quarters_list = bh["quarter"].tolist()
+                # robust compare via normalized strings
+                q_norm = [str(q).strip().upper().replace(" ", "") for q in quarters_list]
+                sel_norm = str(sel_quarter).strip().upper().replace(" ", "")
+                q_t = quarters_list[-1] if sel_norm not in q_norm else quarters_list[q_norm.index(sel_norm)]
+                idx_t = quarters_list.index(q_t)
+                if idx_t == 0:
+                    # auto-fallback to earliest adjacent pair to avoid forcing user to pick a different quarter
+                    if len(quarters_list) >= 2:
+                        q_tm1 = quarters_list[0]
+                        q_t = quarters_list[1]
+                        b_t = bh[bh["quarter"].eq(q_t)].iloc[0]
+                        b_tm1 = bh[bh["quarter"].eq(q_tm1)].iloc[0]
+                        fallback_used = True
+                    else:
+                        st.info("ΔSales waterfall unavailable (no prior period for this brand).")
+                        fallback_used = False
+                else:
+                    q_tm1 = quarters_list[idx_t - 1]
+                    b_t = bh[bh["quarter"].eq(q_t)].iloc[0]
+                    b_tm1 = bh[bh["quarter"].eq(q_tm1)].iloc[0]
+                    fallback_used = False
+                # Helper prices
+                def _price(row):
+                    try:
+                        if "net_sales" in row.index and pd.notna(row["net_sales"]) and row["units_sold"] not in (0, None):
+                            return float(row["net_sales"]) / float(row["units_sold"]) if float(row["units_sold"]) != 0 else float(row.get("price_per_unit", 0.0))
+                    except Exception:
+                        pass
+                    return float(row.get("price_per_unit", 0.0))
+                Units_b_t = float(b_t["units_sold"]); Units_b_tm1 = float(b_tm1["units_sold"])
+                Price_b_t = _price(b_t); Price_b_tm1 = _price(b_tm1)
+                # Prefer net_sales for truth if present; fallback to units×price
+                Sales_b_t = (float(b_t["net_sales"]) if ("net_sales" in b_t.index and pd.notna(b_t.get("net_sales", None))) else Units_b_t * Price_b_t)
+                Sales_b_tm1 = (float(b_tm1["net_sales"]) if ("net_sales" in b_tm1.index and pd.notna(b_tm1.get("net_sales", None))) else Units_b_tm1 * Price_b_tm1)
+                mkt = metrics[metrics["market"].eq(sel_market)]
+                Units_m_t = float(mkt[mkt["quarter"].eq(q_t)]["units_sold"].sum())
+                Units_m_tm1 = float(mkt[mkt["quarter"].eq(q_tm1)]["units_sold"].sum())
+                # Effects (simple illustrative decomposition)
+                try:
+                    Share_t = Units_b_t / Units_m_t if Units_m_t else 0.0
+                    Share_tm1 = Units_b_tm1 / Units_m_tm1 if Units_m_tm1 else 0.0
+                except Exception:
+                    Share_t, Share_tm1 = 0.0, 0.0
+                Market_Effect = (Units_m_t - Units_m_tm1) * Price_b_tm1 * Share_tm1
+                Share_Effect = (Share_t - Share_tm1) * Units_m_t * Price_b_tm1
+                Price_Effect = (Price_b_t - Price_b_tm1) * Units_b_t
+                Delta_Sales = Sales_b_t - Sales_b_tm1
+                Residual = Delta_Sales - (Market_Effect + Share_Effect + Price_Effect)
+                fig_ds = go.Figure(go.Waterfall(
+                    measure=["relative", "relative", "relative", "relative", "total"],
+                    x=["Market", "Share", "Price", "Residual", "ΔSales"],
+                    y=[Market_Effect, Share_Effect, Price_Effect, Residual, Delta_Sales],
+                    text=[f"€{Market_Effect:,.0f}", f"€{Share_Effect:,.0f}", f"€{Price_Effect:,.0f}", f"€{Residual:,.0f}", f"€{Delta_Sales:,.0f}"],
+                    textposition="inside",
+                    connector={"line": {"color": "#AAA"}},
+                ))
+                fig_ds.update_layout(
+                    height=420,
+                    width=800,
+                    margin=dict(l=20, r=20, t=30, b=30),
+                    yaxis=dict(rangemode="tozero"),
+                    xaxis=dict(categoryorder="array", categoryarray=["Market", "Share", "Price", "Residual", "ΔSales"]),
+                    uniformtext_minsize=10,
+                    uniformtext_mode="hide",
+                )
+                fig_ds.update_xaxes(tickangle=0, automargin=True)
+                fig_ds.update_yaxes(automargin=True)
+                st.plotly_chart(fig_ds, use_container_width=True)
+                price_basis = "net" if ("net_sales" in b_t.index and pd.notna(b_t.get("net_sales", None)) and b_t["units_sold"]) else "list"
+                cap = f"Decomposition: {q_tm1} → {q_t} · Price basis: {price_basis}"
+                if idx_t == 0 and fallback_used:
+                    cap += " · Note: selected quarter has no prior; showing earliest available pair."
+                st.caption(cap)
+                with st.expander("ΔSales calc details"):
+                    st.write({
+                        "Sales_t (€)": f"{Sales_b_t:,.0f}",
+                        "Sales_t-1 (€)": f"{Sales_b_tm1:,.0f}",
+                        "ΔSales (€)": f"{Delta_Sales:,.0f}",
+                        "Units_t": f"{Units_b_t:,.0f}",
+                        "Units_t-1": f"{Units_b_tm1:,.0f}",
+                        "Price_t": f"{Price_b_t:,.2f}",
+                        "Price_t-1": f"{Price_b_tm1:,.2f}",
+                        "Market_Effect": f"{Market_Effect:,.0f}",
+                        "Share_Effect": f"{Share_Effect:,.0f}",
+                        "Price_Effect": f"{Price_Effect:,.0f}",
+                        "Residual": f"{Residual:,.0f}",
+                    })
+            else:
+                st.info("ΔSales waterfall unavailable (need at least two periods).")
+        except Exception:
+            st.info("ΔSales waterfall unavailable for this selection.")
+    # Linkage note for units
+    st.caption("Units alignment: Potential/Actual/Headroom (u) in the waterfalls use the same values as the Funnel above.")
+
+    with st.expander("Patients ↔ Units assumption"):
+        st.markdown(
+            f"""
+            - Units shown in the funnel and Headroom waterfall are treated as patient-equivalents.
+            - Conversion factor (resolved for current selection) = `{units_per_patient:.2f}`.
+            - To change it, edit `headroom/config/scoring.yaml` — supported keys (checked in order):
+              1) `assumptions.units_per_patient_equiv_by.market_brand["{sel_market}::{sel_brand}"]`
+              2) `assumptions.units_per_patient_equiv_by.brand["{sel_brand}"]`
+              3) `assumptions.units_per_patient_equiv_by.market["{sel_market}"]`
+              4) `assumptions.units_per_patient_equiv` (global default)
+            - Example:
+              ```yaml
+              assumptions:
+                units_per_patient_equiv: 1.0  # global fallback
+                units_per_patient_equiv_by:
+                  market_brand:
+                    "DE::{sel_brand}": 1.20
+                  brand:
+                    "{sel_brand}": 0.90
+                  market:
+                    "{sel_market}": 1.10
+                  by_market:
+                    DE:
+                      {sel_brand}: 1.15
+              ```
+            - You can later make this brand-specific.
+            """
+        )
+
 st.subheader("Market Metrics (Ranked)")
 df_display = view if "DQ_Missing" not in view.columns else view[~view["DQ_Missing"]]
-# Display-friendly column name for ROI_Score
-df_display_sorted = df_display.sort_values("ROI_Score", ascending=False)
-df_display_sorted = df_display_sorted.rename(columns={"ROI_Score": "Priority_Score"})
+# Sort by Priority_Score (already renamed)
+df_display_sorted = df_display.sort_values("Priority_Score", ascending=False)
 # Add Reach to the table for quick scan if available
 if "Reach_s" in df_display_sorted.columns:
     try:
@@ -217,7 +477,7 @@ else:
     # KPI badges (Sales, Headroom), and the Access, Reach, Priority gauges
     sr_access = float(r.get("access_score", 0.0))
     sr_reach = float(r.get("Reach_s", 0.0))
-    sr_roi = float(r.get("ROI_Score", 0.0))
+    sr_roi = float(r.get("Priority_Score", 0.0))
     sr_sales_value = float(r.get("units_sold", 0.0)) * float(r.get("price_per_unit", 0.0))
     sr_headroom_value = float(r.get("Headroom_Value", 0.0))
 
@@ -326,52 +586,6 @@ else:
                 """
             )
 
-    # Past Performance Decomposition (Waterfall) moved below the funnel
-    st.subheader("Past Performance Decomposition – ΔSales components")
-    # Build current and previous quarter context for selected market/brand
-    brand_hist = metrics[metrics["market"].eq(sel_market)].copy()
-    if not brand_hist.empty:
-        # Sort quarters reliably (expects format YYYYQx)
-        try:
-            brand_hist["_q_sort"] = brand_hist["quarter"].astype(str).apply(lambda q: (int(q[:4]), int(q[-1:])))
-            brand_hist = brand_hist.sort_values(["brand", "_q_sort"])  # ensure per-brand order
-        except Exception:
-            brand_hist = brand_hist.sort_values(["brand", "quarter"])  # fallback
-
-        # Pick latest available quarter for the selected brand
-        bh = brand_hist[brand_hist["brand"].eq(sel_brand)]
-        if len(bh) >= 2:
-            # Determine t (latest) and t-1
-            try:
-                q_list = sorted(bh["quarter"].unique().tolist(), key=lambda q: (int(str(q)[:4]), int(str(q)[-1:])))
-            except Exception:
-                q_list = list(bh["quarter"].unique().tolist())
-            q_t = q_list[-1]
-            q_tm1 = q_list[-2]
-
-            b_t = bh[bh["quarter"].eq(q_t)].iloc[0]
-            b_tm1 = bh[bh["quarter"].eq(q_tm1)].iloc[0]
-
-            Units_b_t = float(b_t["units_sold"])
-            Units_b_tm1 = float(b_tm1["units_sold"])
-                # Prefer net price if net_sales present
-            def _price(row):
-                try:
-                    if "net_sales" in row.index and pd.notna(row["net_sales"]) and row["units_sold"] not in (0, None):
-                        return float(row["net_sales"]) / float(row["units_sold"]) if float(row["units_sold"]) != 0 else float(row.get("price_per_unit", 0.0))
-                except Exception:
-                    pass
-                return float(row.get("price_per_unit", 0.0))
-
-            Price_b_t = _price(b_t)
-            Price_b_tm1 = _price(b_tm1)
-            Sales_b_t = Units_b_t * Price_b_t
-            Sales_b_tm1 = Units_b_tm1 * Price_b_tm1
-
-            # Market totals per quarter (sum across brands in same market)
-            mkt = metrics[metrics["market"].eq(sel_market)]
-            Units_m_t = float(mkt[mkt["quarter"].eq(q_t)]["units_sold"].sum())
-            Units_m_tm1 = float(mkt[mkt["quarter"].eq(q_tm1)]["units_sold"].sum())
 
             Share_tm1 = (Units_b_tm1 / Units_m_tm1) if Units_m_tm1 > 0 else 0.0
             Share_t = (Units_b_t / Units_m_t) if Units_m_t > 0 else 0.0
@@ -401,34 +615,6 @@ else:
                 hovertext=hovertexts,
                 hoverinfo="text+name",
             ))
-            wf.update_layout(
-                height=420,
-                width=720,
-                margin=dict(l=10, r=10, t=10, b=10),
-                yaxis=dict(rangemode="tozero"),
-            )
-            dl, dm, dr = st.columns([1, 2, 1])
-            with dm:
-                st.plotly_chart(wf, use_container_width=False)
-            st.caption(
-                f"Decomposition period: {q_tm1} → {q_t} (brand: {sel_brand}, market: {sel_market}) · "
-                f"Share: {Share_tm1:.2%} → {Share_t:.2%} · Market Units: {Units_m_tm1:,.0f} → {Units_m_t:,.0f} · "
-                f"Price basis: {'net' if ('net_sales' in metrics.columns) else 'list'}"
-            )
-
-            with st.expander("Decomposition inputs"):
-                st.write({
-                    "Units_brand": {str(q_tm1): Units_b_tm1, str(q_t): Units_b_t},
-                    "Price": {str(q_tm1): Price_b_tm1, str(q_t): Price_b_t},
-                    "Sales": {str(q_tm1): Sales_b_tm1, str(q_t): Sales_b_t},
-                    "Market_Units": {str(q_tm1): Units_m_tm1, str(q_t): Units_m_t},
-                    "Share": {str(q_tm1): Share_tm1, str(q_t): Share_t},
-                })
-        else:
-            st.info("Not enough history to decompose past performance (need at least two quarters).")
-    else:
-        st.info("No data available to compute decomposition.")
-
     # Below: Trend grid (2x2) for Sales, Headroom, Price, Patient Share
     st.subheader("Trends – Sales, Headroom, Price, Patient Share")
     trend = metrics[(metrics["market"] == sel_market) & (metrics["brand"] == sel_brand)].copy()
